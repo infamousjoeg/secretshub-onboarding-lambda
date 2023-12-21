@@ -36,23 +36,71 @@ def lambda_handler(event, context):
         tags = response.get('Tags', [])
         tags_dict = {tag['Key']: tag['Value'] for tag in tags}
 
+        # Check for Sourced by CyberArk tag
+        if 'Sourced by CyberArk' not in tags_dict:
+            return {
+                'statusCode': 200,
+                'body': json.dumps(f"Secret {secret_id} not sourced by CyberArk")
+            }
+
+        # Retrieve the secret value of PrivilegeCloudSecret
+        pcloud_secret_id = os.environ.get("PrivilegeCloudSecret")
+        try:
+            pcloud_response = secrets_manager_client.get_secret_value(SecretId=pcloud_secret_id)
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'ResourceNotFoundException':
+                print("The requested secret " + pcloud_secret_id + " was not found")
+            elif e.response['Error']['Code'] == 'InvalidRequestException':
+                print("The request was invalid due to:", e)
+            elif e.response['Error']['Code'] == 'InvalidParameterException':
+                print("The request had invalid params:", e)
+            elif e.response['Error']['Code'] == 'DecryptionFailure':
+                print("The requested secret can't be decrypted using the provided KMS key:", e)
+            elif e.response['Error']['Code'] == 'InternalServiceError':
+                print("An error occurred on service side:", e)
+        else:
+            pcloud_secret_value = pcloud_response.get('SecretString', None)
+            pcloud_secret_dict = json.loads(pcloud_secret_value)
+
         # Retrieve the secret value of the secret
-        response = secrets_manager_client.get_secret_value(SecretId=secret_id)
-        secret_value = response.get('SecretString', None)
-        secret_dict = json.loads(secret_value)
+        try:
+            response = secrets_manager_client.get_secret_value(SecretId=secret_id)
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'ResourceNotFoundException':
+                print("The requested secret " + secret_name + " was not found")
+            elif e.response['Error']['Code'] == 'InvalidRequestException':
+                print("The request was invalid due to:", e)
+            elif e.response['Error']['Code'] == 'InvalidParameterException':
+                print("The request had invalid params:", e)
+            elif e.response['Error']['Code'] == 'DecryptionFailure':
+                print("The requested secret can't be decrypted using the provided KMS key:", e)
+            elif e.response['Error']['Code'] == 'InternalServiceError':
+                print("An error occurred on service side:", e)
+        else:
+            secret_value = response.get('SecretString', None)
+            secret_dict = json.loads(secret_value)
 
         # Create dict of CyberArk metadata
         cyberark_dict = {
-            "subdomain": os.environ.get('CYBERARK_SUBDOMAIN', None),
-            "svc_username": os.environ.get("CYBERARK_SVC_USERNAME", None),
-            "svc_password": os.environ.get("CYBERARK_SVC_PASSWORD", None),
+            "subdomain":    pcloud_secret_dict.get('subdomain', None),
+            "svc_username": pcloud_secret_dict.get('username', None),
+            "svc_password": pcloud_secret_dict.get('password', None),
+            "safe":         tags_dict.get('CyberArk Safe', None),
+            "account":      tags_dict.get('CyberArk Account', None),
+            "address":      secret_dict.get('address', None),
+            "username":     secret_dict.get('username', None),
+            "password":     secret_dict.get('password', None),
+            "platformId":   secret_dict.get('platformId', None)
         }
-        cyberark_dict['safe'] = tags_dict.get('CyberArk Safe', None)
-        cyberark_dict['platformId'] = tags_dict.get('CyberArk Platform', None)
-        cyberark_dict['account'] = tags_dict.get('CyberArk Account', None)
-        cyberark_dict['address'] = secret_dict.get('address', None)
-        cyberark_dict['username'] = secret_dict.get('username', None)
-        cyberark_dict['password'] = secret_dict.get('password', None)
+
+        # If no address, check if RDS Secret containing host
+        if cyberark_dict['address'] is None:
+            cyberark_dict['address'] = secret_dict.get('host', None)
+        
+        # If no platformId, check if RDS Secret contains as tag
+        if cyberark_dict['platformId'] is None:
+            cyberark_dict['platformId'] = tags_dict.get('CyberArk Platform', None)
+
         print(f"CyberArk Metadata: {cyberark_dict}")
 
         # Check for None as the value for any dict keys
@@ -63,6 +111,7 @@ def lambda_handler(event, context):
                 'statusCode': 404,
                 'body': json.dumps(f"Required key value(s) not found: {none_keys}")
             }
+            print(f'HTTP 404: Required key value(s) not found: {none_keys}')
 
         # Authenticate to CyberArk Identity
         url = f"https://{cyberark_dict['subdomain']}.cyberark.cloud/api/idadmin/oauth2/platformtoken"
@@ -82,7 +131,6 @@ def lambda_handler(event, context):
                     'statusCode': 401,
                     'body': json.dumps(f"There was a problem authenticating to: {cyberark_dict['subdomain']}.privilegecloud.cyberark.cloud")
                 }
-            print(f"Session Token: {session_token}")
         else:
             return {
                 'statusCode': 500,
